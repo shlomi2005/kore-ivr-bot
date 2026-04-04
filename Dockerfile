@@ -11,4 +11,5 @@ COPY *.py .
 
 ENV DATA_DIR=/data
 
-CMD ["python", "newsupdates_ext300.py"]
+ENV BOT_SCRIPT=newsupdates_ext300.py
+CMD python ${BOT_SCRIPT}
