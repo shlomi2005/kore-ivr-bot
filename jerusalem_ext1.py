@@ -101,7 +101,7 @@ def build_tts_text(post: dict) -> str:
     content = title
     if excerpt and excerpt != title:
         content = f"{title}. {excerpt}"
-    return f"{prefix}בחדשות ירושלים {content}"
+    return f"{prefix}בקול ירושלים {content}"
 
 
 async def _tts_async(text: str, output_path: str):
@@ -161,12 +161,14 @@ def process_once():
         return
 
     if not initialized:
-        max_id = max(p["id"] for p in posts)
-        state["last_id"] = max_id
+        sorted_posts = sorted(posts, key=lambda p: p["id"])
+        backfill = sorted_posts[-3:]
+        min_backfill_id = backfill[0]["id"] - 1
+        state["last_id"] = min_backfill_id
+        last_id = min_backfill_id
         state["initialized"] = True
         save_state(state)
-        logger.info(f"אותחל. ID אחרון: {max_id}")
-        return
+        logger.info(f"אותחל. מעבד {len(backfill)} כתבות אחרונות")
 
     new_posts = sorted([p for p in posts if p["id"] > last_id], key=lambda p: p["id"])
 
