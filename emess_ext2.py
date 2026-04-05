@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 # שלוחה 2 — שידורים חוזרים מאתר אמס (emess.co.il / קול חי)
 
+import asyncio
 import os
 import json
 import time
 import logging
 import mimetypes
+from datetime import datetime
+
 import requests
+import edge_tts
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
@@ -21,12 +25,23 @@ SHOWS = [
     {"name": "סדר שלישי",           "tax_id": 518},
 ]
 
+DAYS_HE = {
+    6: "יום ראשון",
+    0: "יום שני",
+    1: "יום שלישי",
+    2: "יום רביעי",
+    3: "יום חמישי",
+    4: "יום שישי",
+    5: "שבת",
+}
+
 CONFIG = {
     "target_extension": "2",
     "api_base": "https://www.emess.co.il/wp-json/wp/v2/aryo_programs",
     "check_interval_seconds": 300,
     "state_file": os.path.join(DATA_DIR, "state_emess.json"),
     "downloads_dir": os.path.join(DATA_DIR, "emess_downloads"),
+    "tts_voice": "he-IL-AvriNeural",
     "timeout": 60,
 }
 
@@ -90,6 +105,36 @@ def get_audio_url(episode: dict) -> str:
     return ""
 
 
+def episode_day_he(episode: dict) -> str:
+    """מחזיר שם היום בעברית לפי תאריך הפרק"""
+    try:
+        dt = datetime.fromisoformat(episode["date"])
+        return DAYS_HE.get(dt.weekday(), "")
+    except Exception:
+        return ""
+
+
+async def _tts_async(text: str, path: str):
+    last_err = None
+    for _ in range(5):
+        try:
+            await edge_tts.Communicate(text, CONFIG["tts_voice"]).save(path)
+            return
+        except Exception as e:
+            last_err = e
+            await asyncio.sleep(3)
+    raise last_err
+
+
+def create_tts_announcement(ep_id: int, show_name: str, day_he: str) -> str:
+    ensure_dir(CONFIG["downloads_dir"])
+    path = os.path.join(CONFIG["downloads_dir"], f"announce_{ep_id}.mp3")
+    text = f"{day_he} במוקד הפודקאסט {show_name}"
+    logger.info(f"יוצר הודעה: {text}")
+    asyncio.run(_tts_async(text, path))
+    return path
+
+
 def download_mp3(url: str, path: str):
     headers = {
         "user-agent": "Mozilla/5.0",
@@ -122,6 +167,54 @@ def upload_to_yemot(local_path: str):
     return result
 
 
+def upload_episode(ep: dict, show_name: str):
+    """מעלה הודעת הכרזה ואז את קובץ השידור"""
+    ep_id = ep["id"]
+    audio_url = get_audio_url(ep)
+    if not audio_url:
+        logger.warning(f"{show_name} #{ep_id}: אין קובץ אודיו — מדלג")
+        return False
+
+    day_he = episode_day_he(ep)
+    title = ep.get("title", {}).get("rendered", str(ep_id))
+    ensure_dir(CONFIG["downloads_dir"])
+
+    announce_path = os.path.join(CONFIG["downloads_dir"], f"announce_{ep_id}.mp3")
+    episode_path = os.path.join(CONFIG["downloads_dir"], f"emess_{ep_id}.mp3")
+
+    try:
+        # 1. הודעת הכרזה
+        announce_path = create_tts_announcement(ep_id, show_name, day_he)
+        upload_to_yemot(announce_path)
+        logger.info(f"{show_name} #{ep_id}: הכרזה הועלתה")
+        try:
+            os.remove(announce_path)
+        except Exception:
+            pass
+
+        # 2. קובץ השידור
+        logger.info(f"{show_name} #{ep_id}: מוריד {audio_url}")
+        download_mp3(audio_url, episode_path)
+        result = upload_to_yemot(episode_path)
+        logger.info(f"{show_name} #{ep_id}: שידור הועלה | {title} | {result}")
+        try:
+            os.remove(episode_path)
+        except Exception:
+            pass
+
+        return True
+
+    except Exception as e:
+        logger.exception(f"{show_name} #{ep_id}: שגיאה: {e}")
+        for p in [announce_path, episode_path]:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        return False
+
+
 def process_show(show: dict, state: dict):
     tax_id = show["tax_id"]
     name = show["name"]
@@ -140,11 +233,15 @@ def process_show(show: dict, state: dict):
         return
 
     if not initialized:
-        max_id = max(ep["id"] for ep in episodes)
-        show_state["last_id"] = max_id
+        # העלה את הפרק האחרון בלבד
+        latest = max(episodes, key=lambda ep: ep["id"])
+        logger.info(f"{name}: אתחול — מעלה פרק אחרון #{latest['id']}")
+        if upload_episode(latest, name):
+            show_state["last_id"] = latest["id"]
+        else:
+            show_state["last_id"] = latest["id"]  # דלג גם אם נכשל
         show_state["initialized"] = True
         save_state(state)
-        logger.info(f"{name}: אותחל. ID אחרון: {max_id}")
         return
 
     new_eps = sorted(
@@ -159,41 +256,8 @@ def process_show(show: dict, state: dict):
     logger.info(f"{name}: נמצאו {len(new_eps)} פרקים חדשים")
 
     for ep in new_eps:
-        ep_id = ep["id"]
-        title = ep.get("title", {}).get("rendered", str(ep_id))
-        audio_url = get_audio_url(ep)
-
-        if not audio_url:
-            logger.warning(f"{name} #{ep_id}: אין קובץ אודיו — מדלג")
-            show_state["last_id"] = ep_id
-            save_state(state)
-            continue
-
-        ensure_dir(CONFIG["downloads_dir"])
-        local_path = os.path.join(CONFIG["downloads_dir"], f"emess_{ep_id}.mp3")
-
-        try:
-            logger.info(f"{name} #{ep_id}: מוריד {audio_url}")
-            download_mp3(audio_url, local_path)
-
-            result = upload_to_yemot(local_path)
-            logger.info(f"{name} #{ep_id}: הועלה | {title} | {result}")
-
-            try:
-                os.remove(local_path)
-            except Exception:
-                pass
-
-        except Exception as e:
-            logger.exception(f"{name} #{ep_id}: שגיאה: {e}")
-            try:
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-            except Exception:
-                pass
-            continue
-
-        show_state["last_id"] = ep_id
+        upload_episode(ep, name)
+        show_state["last_id"] = ep["id"]
         save_state(state)
         time.sleep(2)
 
