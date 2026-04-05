@@ -183,22 +183,22 @@ def upload_episode(ep: dict, show_name: str):
     episode_path = os.path.join(CONFIG["downloads_dir"], f"emess_{ep_id}.mp3")
 
     try:
-        # 1. הודעת הכרזה
+        # 1. קובץ השידור (עולה ראשון = מושמע שני)
+        logger.info(f"{show_name} #{ep_id}: מוריד {audio_url}")
+        download_mp3(audio_url, episode_path)
+        upload_to_yemot(episode_path)
+        logger.info(f"{show_name} #{ep_id}: שידור הועלה | {title}")
+        try:
+            os.remove(episode_path)
+        except Exception:
+            pass
+
+        # 2. הודעת הכרזה (עולה שני = מושמעת ראשונה)
         announce_path = create_tts_announcement(ep_id, show_name, day_he)
         upload_to_yemot(announce_path)
         logger.info(f"{show_name} #{ep_id}: הכרזה הועלתה")
         try:
             os.remove(announce_path)
-        except Exception:
-            pass
-
-        # 2. קובץ השידור
-        logger.info(f"{show_name} #{ep_id}: מוריד {audio_url}")
-        download_mp3(audio_url, episode_path)
-        result = upload_to_yemot(episode_path)
-        logger.info(f"{show_name} #{ep_id}: שידור הועלה | {title} | {result}")
-        try:
-            os.remove(episode_path)
         except Exception:
             pass
 
