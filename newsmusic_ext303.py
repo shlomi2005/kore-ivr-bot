@@ -9,7 +9,7 @@ import time
 import logging
 import mimetypes
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote
 
 import requests
@@ -263,15 +263,19 @@ def download_file(url: str, download_dir: str) -> str:
     return local_path
 
 
+def israel_time() -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%H:%M")
+
 def build_tts_text(title: str) -> str:
     title = re.sub(r"\s+", " ", title).strip()
+    t = israel_time()
     if " - " in title:
         parts = title.split(" - ", 1)
         artist = parts[0].strip()
         song = parts[1].strip()
-        return f"מיוזיקליק בקו התוכן הישראלי הזמר {artist} בשיר חדש {song}"
+        return f"{t} במוקד המוזיקה הזמר {artist} בשיר {song}"
     else:
-        return f"מיוזיקליק בקו התוכן הישראלי {title}"
+        return f"{t} במוקד המוזיקה {title}"
 
 
 async def _tts_async(text: str, output_path: str):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# שלוחה 304 — מבזקים (kore.co.il/mplus)
+# שלוחה 301 — עדכוני פוליטיקה (authenti.newsupdates.click)
 
 import asyncio
 import os
@@ -16,19 +16,20 @@ import edge_tts
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 CONFIG = {
-    "target_extension": "304",
+    "target_extension": "301",
     "yemot_private": False,
     "convert_audio": True,
-    "api_url": "https://www.kore.co.il/api_mplus/mplus/results",
+    "api_url": "https://authenti.newsupdates.click/api/get_messages_optimized.php",
+    "api_source": "עדכוני פוליטיקה",
     "check_interval_seconds": 120,
-    "tts_dir": os.path.join(DATA_DIR, "tts_kore"),
-    "state_file": os.path.join(DATA_DIR, "state_kore.json"),
+    "tts_dir": os.path.join(DATA_DIR, "tts_politics"),
+    "state_file": os.path.join(DATA_DIR, "state_politics.json"),
     "timeout": 30,
     "tts_voice": "he-IL-AvriNeural",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("kore-mplus-ext304")
+logger = logging.getLogger("politics-ext301")
 
 
 def get_api_key() -> str:
@@ -39,6 +40,13 @@ def get_api_key() -> str:
     return key
 
 
+def get_cookies() -> dict:
+    return {
+        "PHPSESSID": os.environ.get("NEWSUPDATES_PHPSESSID", "kvh2n8p4jm7ko44d62qo378mkp"),
+        "user_sess": os.environ.get("NEWSUPDATES_USER_SESS", "7de4873c2bca5cda7b859a0d0daad87017124f227ae9b40e97b3618c307b1133"),
+    }
+
+
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
@@ -46,12 +54,12 @@ def ensure_dir(path):
 def load_state() -> dict:
     path = CONFIG["state_file"]
     if not os.path.exists(path):
-        return {"seen_ids": [], "initialized": False}
+        return {"last_id": 0, "initialized": False}
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"seen_ids": [], "initialized": False}
+        return {"last_id": 0, "initialized": False}
 
 
 def save_state(state: dict):
@@ -62,30 +70,24 @@ def save_state(state: dict):
     os.replace(tmp, path)
 
 
-def fetch_items() -> list:
-    headers = {
-        "accept": "application/json, text/plain, */*",
-        "content-type": "application/json; charset=UTF-8",
-        "origin": "https://www.kore.co.il",
-        "referer": "https://www.kore.co.il/mplus",
-        "user-agent": "Mozilla/5.0",
-    }
-    r = requests.post(CONFIG["api_url"], json={"page": 0}, headers=headers, timeout=CONFIG["timeout"])
+def fetch_messages(last_id: int) -> list:
+    params = {"source": CONFIG["api_source"], "last_id": last_id, "limit": 50}
+    headers = {"accept": "*/*", "referer": "https://authenti.newsupdates.click/", "user-agent": "Mozilla/5.0"}
+    r = requests.get(CONFIG["api_url"], params=params, headers=headers, cookies=get_cookies(), timeout=CONFIG["timeout"])
     r.raise_for_status()
-    return r.json().get("data", {}).get("items", [])
+    return r.json().get("messages", [])
 
 
 def clean_text(text: str) -> str:
-    text = re.sub(r"\r\n|\r|\n", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:500]
 
 
-def build_tts_text(item: dict) -> str:
-    t = item.get("date_parsed", "").strip()
-    content = clean_text(item.get("short_text", ""))
+def build_tts_text(msg: dict) -> str:
+    t = msg.get("formatted_time", "").strip()
+    desc = clean_text(msg.get("description", ""))
     prefix = f"{t} " if t else ""
-    return f"{prefix}במוקד הציבור {content}"
+    return f"{prefix}במוקד הפוליטי {desc}"
 
 
 async def _tts_async(text: str, output_path: str):
@@ -100,9 +102,9 @@ async def _tts_async(text: str, output_path: str):
     raise last_error
 
 
-def create_tts_file(item_id: int, text: str) -> str:
+def create_tts_file(msg_id: int, text: str) -> str:
     ensure_dir(CONFIG["tts_dir"])
-    path = os.path.join(CONFIG["tts_dir"], f"mplus_{item_id}.mp3")
+    path = os.path.join(CONFIG["tts_dir"], f"msg_{msg_id}.mp3")
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
     logger.info(f"יוצר TTS: {text[:60]}")
@@ -132,61 +134,47 @@ def upload_to_yemot(local_path: str):
 
 def process_once():
     state = load_state()
-    seen_ids = set(state.get("seen_ids", []))
+    last_id = state.get("last_id", 0)
     initialized = state.get("initialized", False)
 
-    logger.info("סורק kore.co.il/mplus")
-    items = fetch_items()
-    logger.info(f"התקבלו {len(items)} פריטים")
+    logger.info(f"בודק עדכוני פוליטיקה מ-ID: {last_id}")
+    messages = fetch_messages(last_id)
+    logger.info(f"התקבלו {len(messages)} הודעות")
 
-    if not items:
+    if not messages:
         return
 
     if not initialized:
-        # ריצה ראשונה — סמן הכל כנראה
-        for item in items:
-            seen_ids.add(item["id"])
-        state["seen_ids"] = sorted(seen_ids)
+        max_id = max(m["id"] for m in messages)
+        state["last_id"] = max_id
         state["initialized"] = True
         save_state(state)
-        logger.info(f"אותחל. {len(seen_ids)} פריטים סומנו")
+        logger.info(f"אותחל. ID אחרון: {max_id}")
         return
 
-    # חדשים בלבד, מהישן לחדש
-    new_items = sorted(
-        [i for i in items if i["id"] not in seen_ids],
-        key=lambda x: x["id"]
-    )
-
-    if not new_items:
-        logger.info("אין מבזקים חדשים")
-        return
-
-    logger.info(f"נמצאו {len(new_items)} מבזקים חדשים")
-
-    for item in new_items:
-        content = item.get("short_text", "").strip()
-        if not content:
-            seen_ids.add(item["id"])
+    for msg in sorted(messages, key=lambda m: m["id"]):
+        if msg.get("admin_only"):
+            continue
+        desc = msg.get("description", "").strip()
+        if not desc:
             continue
 
-        item_id = item["id"]
-        tts_text = build_tts_text(item)
+        msg_id = msg["id"]
+        tts_text = build_tts_text(msg)
 
         try:
-            tts_path = create_tts_file(item_id, tts_text)
+            tts_path = create_tts_file(msg_id, tts_text)
             result = upload_to_yemot(tts_path)
-            logger.info(f"הועלה #{item_id}: {tts_text[:60]} | {result}")
+            logger.info(f"הועלה #{msg_id}: {tts_text[:60]} | {result}")
             try:
                 os.remove(tts_path)
             except Exception:
                 pass
         except Exception as e:
-            logger.exception(f"שגיאה בפריט #{item_id}: {e}")
+            logger.exception(f"שגיאה #{msg_id}: {e}")
             continue
 
-        seen_ids.add(item_id)
-        state["seen_ids"] = sorted(seen_ids)
+        state["last_id"] = msg_id
         save_state(state)
         time.sleep(1)
 
@@ -194,7 +182,7 @@ def process_once():
 def main():
     ensure_dir(CONFIG["tts_dir"])
     get_api_key()
-    logger.info("התחיל — kore mplus שלוחה 304")
+    logger.info("התחיל — עדכוני פוליטיקה שלוחה 301")
     logger.info(f"בדיקה כל {CONFIG['check_interval_seconds']} שניות")
     while True:
         try:

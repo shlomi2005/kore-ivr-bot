@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# שלוחה 300 — חדשות מכל הערוצים (authenti.newsupdates.click)
+# שלוחה 302 — בחורי ישיבות (yeshiva-zucher.chatfree.app)
 
 import asyncio
 import os
@@ -9,6 +9,7 @@ import json
 import time
 import logging
 import mimetypes
+from datetime import datetime, timezone, timedelta
 
 import requests
 import edge_tts
@@ -16,19 +17,19 @@ import edge_tts
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 CONFIG = {
-    "target_extension": "300",
+    "target_extension": "302",
     "yemot_private": False,
     "convert_audio": True,
-    "api_url": "https://authenti.newsupdates.click/api/get_messages_optimized.php",
+    "api_url": "https://yeshiva-zucher.chatfree.app/api/messages",
     "check_interval_seconds": 120,
-    "tts_dir": os.path.join(DATA_DIR, "tts_newsupdates"),
-    "state_file": os.path.join(DATA_DIR, "state_newsupdates.json"),
+    "tts_dir": os.path.join(DATA_DIR, "tts_yeshiva"),
+    "state_file": os.path.join(DATA_DIR, "state_yeshiva.json"),
     "timeout": 30,
     "tts_voice": "he-IL-AvriNeural",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("newsupdates-ext300")
+logger = logging.getLogger("yeshiva-ext302")
 
 
 def get_api_key() -> str:
@@ -41,8 +42,8 @@ def get_api_key() -> str:
 
 def get_cookies() -> dict:
     return {
-        "PHPSESSID": os.environ.get("NEWSUPDATES_PHPSESSID", "kvh2n8p4jm7ko44d62qo378mkp"),
-        "user_sess": os.environ.get("NEWSUPDATES_USER_SESS", "7de4873c2bca5cda7b859a0d0daad87017124f227ae9b40e97b3618c307b1133"),
+        "cf_clearance": os.environ.get("CHATFREE_CF_CLEARANCE", "GFY8w1IaLNUFmlQAbUY9rpa047RfmrEoDwmpF_tWJzs-1775031759-1.2.1.1-4lP_LNzhxnB1lm5Ez0lx7ejc5FDnESaQsXY6Wyv4uN02.6wTdhVnVHRQ4YawJpuUAx7pHNNU.QbrbxKEz.MGImvUsew.tituBhGmwgTuGpciCPLiz0FnfNohuVsWwMzZrBVqr1o_wD5iT0QTp9RkMJsCi_b_jsynPpZDFxpvt5qu7wjdr6t_YnCzHD8b_0970UY0CC0gUM.GoPpylxchRvto0Uzfbu8PFIjU7u1fqLk"),
+        "channel_session": os.environ.get("CHATFREE_SESSION", "MTc3NTM4MDYxMXxOd3dBTkRWRk4wdFdOMUpXTTFkT1draElUMWcwV1ZkWVFqVkJWMWczVkVaSVdGcEJWRmhNVlUxWlZVRkxUVE0wUVVsR1IxZEdWVkU5fFMGF-KzTTwRdhIfPU0HmFErxXLXJrbuzM4aflhSFLoT"),
     }
 
 
@@ -69,30 +70,50 @@ def save_state(state: dict):
     os.replace(tmp, path)
 
 
-def fetch_messages(last_id: int) -> list:
-    url = CONFIG["api_url"]
-    params = {"source": "ALL_CHANNELS", "last_id": last_id, "limit": 50}
+def fetch_messages() -> list:
+    params = {"offset": 0, "limit": 20, "direction": "desc"}
     headers = {
-        "accept": "*/*",
-        "referer": "https://authenti.newsupdates.click/index.php",
-        "user-agent": "Mozilla/5.0",
+        "accept": "application/json, text/plain, */*",
+        "referer": "https://yeshiva-zucher.chatfree.app/",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
     }
-    r = requests.get(url, params=params, headers=headers, cookies=get_cookies(), timeout=CONFIG["timeout"])
+    r = requests.get(CONFIG["api_url"], params=params, headers=headers, cookies=get_cookies(), timeout=CONFIG["timeout"])
     r.raise_for_status()
-    data = r.json()
-    return data.get("messages", [])
+    return r.json().get("messages", [])
+
+
+def parse_timestamp(ts: str) -> str:
+    """המרת UTC timestamp לשעת ישראל HH:MM"""
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(ts)
+        il_time = dt.astimezone(timezone(timedelta(hours=3)))
+        return il_time.strftime("%H:%M")
+    except Exception:
+        return ""
 
 
 def clean_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", text).strip()
+    # הסרת תמונות/וידאו embedded
+    text = re.sub(r'\[(?:image|video)-embedded#\]\([^)]+\)', '', text)
+    # הסרת הפוטר החוזר
+    text = re.split(r"'ישיב'ע זוכע'ר' - סקופים בלעדיים", text)[0]
+    # הסרת markdown bold
+    text = text.replace('*', '')
+    # הסרת קישורים
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'chat\.whatsapp\.com/\S+', '', text)
+    text = re.sub(r'wa\.me/\S+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return text[:500]
 
 
 def build_tts_text(msg: dict) -> str:
-    t = msg.get("formatted_time", "").strip()
-    desc = clean_text(msg.get("description", ""))
+    t = parse_timestamp(msg.get("timestamp", ""))
+    content = clean_text(msg.get("text", ""))
     prefix = f"{t} " if t else ""
-    return f"{prefix}במוקד הידיעות {desc}"
+    return f"{prefix}במוקד עולם התורה {content}"
 
 
 async def _tts_async(text: str, output_path: str):
@@ -142,15 +163,17 @@ def process_once():
     last_id = state.get("last_id", 0)
     initialized = state.get("initialized", False)
 
-    logger.info(f"בודק הודעות חדשות מ-ID: {last_id}")
-    messages = fetch_messages(last_id)
-    logger.info(f"התקבלו {len(messages)} הודעות")
+    logger.info(f"בודק הודעות ישיבות מ-ID: {last_id}")
+    try:
+        messages = fetch_messages()
+    except Exception as e:
+        logger.exception(f"שגיאה בקריאת API: {e}")
+        return
 
     if not messages:
         return
 
     if not initialized:
-        # ריצה ראשונה — שמור את ה-ID האחרון ואל תעלה כלום
         max_id = max(m["id"] for m in messages)
         state["last_id"] = max_id
         state["initialized"] = True
@@ -158,14 +181,19 @@ def process_once():
         logger.info(f"אותחל. ID אחרון: {max_id}")
         return
 
-    # מיין מהישן לחדש
-    new_messages = sorted(messages, key=lambda m: m["id"])
+    new_messages = sorted([m for m in messages if m["id"] > last_id], key=lambda m: m["id"])
+
+    if not new_messages:
+        logger.info("אין הודעות חדשות")
+        return
+
+    logger.info(f"נמצאו {len(new_messages)} הודעות חדשות")
 
     for msg in new_messages:
-        if msg.get("admin_only"):
+        if msg.get("deleted"):
             continue
-        desc = msg.get("description", "").strip()
-        if not desc:
+        text = clean_text(msg.get("text", ""))
+        if not text:
             continue
 
         msg_id = msg["id"]
@@ -180,7 +208,7 @@ def process_once():
             except Exception:
                 pass
         except Exception as e:
-            logger.exception(f"שגיאה בהודעה #{msg_id}: {e}")
+            logger.exception(f"שגיאה #{msg_id}: {e}")
             continue
 
         state["last_id"] = msg_id
@@ -191,7 +219,7 @@ def process_once():
 def main():
     ensure_dir(CONFIG["tts_dir"])
     get_api_key()
-    logger.info("התחיל — newsupdates שלוחה 300")
+    logger.info("התחיל — בחורי ישיבות שלוחה 302")
     logger.info(f"בדיקה כל {CONFIG['check_interval_seconds']} שניות")
     while True:
         try:
