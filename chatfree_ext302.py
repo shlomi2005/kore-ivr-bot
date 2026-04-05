@@ -176,12 +176,14 @@ def process_once():
         return
 
     if not initialized:
-        max_id = max(m["id"] for m in messages)
-        state["last_id"] = max_id
+        sorted_msgs = sorted(messages, key=lambda m: m["id"])
+        backfill = sorted_msgs[-5:]
+        min_backfill_id = backfill[0]["id"] - 1
+        state["last_id"] = min_backfill_id
+        last_id = min_backfill_id
         state["initialized"] = True
         save_state(state)
-        logger.info(f"אותחל. ID אחרון: {max_id}")
-        return
+        logger.info(f"אותחל. מעבד {len(backfill)} הודעות אחרונות")
 
     new_messages = sorted([m for m in messages if m["id"] > last_id], key=lambda m: m["id"])
 
