@@ -101,6 +101,8 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\[(?:image|video)-embedded#\]\([^)]+\)', '', text)
     # הסרת הפוטר החוזר
     text = re.split(r"'ישיב'ע זוכע'ר' - סקופים בלעדיים", text)[0]
+    # הסרת קידומת "ישיב'ע זוכע'ר: " בתחילת ההודעה
+    text = re.sub(r"^\S+\s+\S+:\s*", "", text)
     # הסרת markdown bold
     text = text.replace('*', '')
     # הסרת קישורים
