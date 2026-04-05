@@ -12,6 +12,7 @@ import mimetypes
 
 import requests
 import edge_tts
+from hebrew_time import time_to_hebrew
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
@@ -84,7 +85,7 @@ def clean_text(text: str) -> str:
 
 
 def build_tts_text(msg: dict) -> str:
-    t = msg.get("formatted_time", "").strip()
+    t = time_to_hebrew(msg.get("formatted_time", ""))
     desc = clean_text(msg.get("description", ""))
     prefix = f"{t} " if t else ""
     return f"{prefix}במוקד הפוליטי {desc}"

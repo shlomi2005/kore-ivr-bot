@@ -14,6 +14,7 @@ from urllib.parse import unquote
 
 import requests
 import edge_tts
+from hebrew_time import time_to_hebrew
 
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
@@ -268,7 +269,7 @@ def israel_time() -> str:
 
 def build_tts_text(title: str) -> str:
     title = re.sub(r"\s+", " ", title).strip()
-    t = israel_time()
+    t = time_to_hebrew(israel_time())
     if " - " in title:
         parts = title.split(" - ", 1)
         artist = parts[0].strip()

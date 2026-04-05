@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 import edge_tts
+from hebrew_time import time_to_hebrew
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
@@ -110,7 +111,7 @@ def clean_text(text: str) -> str:
 
 
 def build_tts_text(msg: dict) -> str:
-    t = parse_timestamp(msg.get("timestamp", ""))
+    t = time_to_hebrew(parse_timestamp(msg.get("timestamp", "")))
     content = clean_text(msg.get("text", ""))
     prefix = f"{t} " if t else ""
     return f"{prefix}במוקד עולם התורה {content}"
