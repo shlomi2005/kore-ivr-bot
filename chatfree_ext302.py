@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 import edge_tts
+from curl_cffi import requests as cffi_requests
 from hebrew_time import time_to_hebrew
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
@@ -41,11 +42,8 @@ def get_api_key() -> str:
     return key
 
 
-def get_cookies() -> dict:
-    return {
-        "cf_clearance": os.environ.get("CHATFREE_CF_CLEARANCE", "GFY8w1IaLNUFmlQAbUY9rpa047RfmrEoDwmpF_tWJzs-1775031759-1.2.1.1-4lP_LNzhxnB1lm5Ez0lx7ejc5FDnESaQsXY6Wyv4uN02.6wTdhVnVHRQ4YawJpuUAx7pHNNU.QbrbxKEz.MGImvUsew.tituBhGmwgTuGpciCPLiz0FnfNohuVsWwMzZrBVqr1o_wD5iT0QTp9RkMJsCi_b_jsynPpZDFxpvt5qu7wjdr6t_YnCzHD8b_0970UY0CC0gUM.GoPpylxchRvto0Uzfbu8PFIjU7u1fqLk"),
-        "channel_session": os.environ.get("CHATFREE_SESSION", "MTc3NTM4MDYxMXxOd3dBTkRWRk4wdFdOMUpXTTFkT1draElUMWcwV1ZkWVFqVkJWMWczVkVaSVdGcEJWRmhNVlUxWlZVRkxUVE0wUVVsR1IxZEdWVkU5fFMGF-KzTTwRdhIfPU0HmFErxXLXJrbuzM4aflhSFLoT"),
-    }
+def get_session_cookie() -> str:
+    return os.environ.get("CHATFREE_SESSION", "MTc3NTM4MDYxMXxOd3dBTkRWRk4wdFdOMUpXTTFkT1draElUMWcwV1ZkWVFqVkJWMWczVkVaSVdGcEJWRmhNVlUxWlZVRkxUVE0wUVVsR1IxZEdWVkU9fFMGF-KzTTwRdhIfPU0HmFErxXLXJrbuzM4aflhSFLoT")
 
 
 def ensure_dir(path):
@@ -76,9 +74,12 @@ def fetch_messages() -> list:
     headers = {
         "accept": "application/json, text/plain, */*",
         "referer": "https://yeshiva-zucher.chatfree.app/",
-        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        "cookie": f"channel_session={get_session_cookie()}",
     }
-    r = requests.get(CONFIG["api_url"], params=params, headers=headers, cookies=get_cookies(), timeout=CONFIG["timeout"])
+    r = cffi_requests.get(
+        CONFIG["api_url"], params=params, headers=headers,
+        impersonate="chrome110", timeout=CONFIG["timeout"]
+    )
     r.raise_for_status()
     return r.json().get("messages", [])
 

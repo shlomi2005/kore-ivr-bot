@@ -1,2 +1,3 @@
 requests
 edge-tts
+curl_cffi
