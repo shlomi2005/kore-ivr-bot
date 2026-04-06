@@ -93,12 +93,21 @@ def israel_time() -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%H:%M")
 
 
-def build_tts_text(title: str) -> str:
+def clean_title(title: str) -> str:
+    # הסרת HTML entities
+    title = re.sub(r"&[a-zA-Z]+;", " ", title)
+    title = re.sub(r"&#\d+;", " ", title)
+    # הסרת תווים שנקראים בקול על ידי TTS (אבל לא מקף שמשמש כמפריד אמן/שיר)
+    title = re.sub(r"[|•·\[\](){}<>_/\\@#%^*+=~`]", " ", title)
     title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+
+def build_tts_text(title: str) -> str:
+    title = clean_title(title)
     t = time_to_hebrew(israel_time())
     if " - " in title:
         parts = title.split(" - ", 1)
-        # בהמנגן הפורמט הוא: "שם השיר - שם האמן"
         song = parts[0].strip()
         artist = parts[1].strip()
         return f"{t} במוקד המוזיקה הזמר {artist} בשיר {song}"
