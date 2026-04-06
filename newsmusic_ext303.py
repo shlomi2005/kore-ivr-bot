@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# שלוחה 303 — שירים חדשים (hamenagen.net)
 
 import asyncio
 import os
@@ -10,501 +11,276 @@ import logging
 import mimetypes
 import subprocess
 from datetime import datetime, timezone, timedelta
-from urllib.parse import unquote
 
 import requests
 import edge_tts
+from curl_cffi import requests as cffi_requests
 from hebrew_time import time_to_hebrew
-
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 CONFIG = {
-    # ימות המשיח
     "target_extension": "303",
-    "yemot_private": False,
-    "convert_audio": True,
-
-    # האתר למעקב
-    "feed_url": "https://newsmusic.blogspot.com/feeds/posts/default?alt=json&max-results=30",
-
-    # כל כמה זמן לבדוק
+    "api_url": "https://hamenagen.net/wp-json/wp/v2/posts",
+    "category_id": 4,
     "check_interval_seconds": 300,
-
-    # קבצים מקומיים
-    "download_dir": os.path.join(DATA_DIR, "downloads_musiclik"),
-    "tts_dir": os.path.join(DATA_DIR, "tts_musiclik"),
-    "compressed_dir": os.path.join(DATA_DIR, "compressed_musiclik"),
-    "state_file": os.path.join(DATA_DIR, "state_musiclik.json"),
-
-    # רשת
+    "tts_dir": os.path.join(DATA_DIR, "tts_music"),
+    "download_dir": os.path.join(DATA_DIR, "dl_music"),
+    "state_file": os.path.join(DATA_DIR, "state_music.json"),
     "timeout": 60,
-    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) MusiclikToYemot/1.0",
-
-    # קריינות — קול גברי עברית
     "tts_voice": "he-IL-AvriNeural",
-
-    # הגבלת גודל העלאה
     "max_upload_size_mb": 45,
     "ffmpeg_bitrate": "48k",
     "ffmpeg_sample_rate": "22050",
-    "ffmpeg_channels": "1",
 }
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("newsmusic-ext303")
-
-
-ARCHIVE_MP3_RE = re.compile(
-    r'https://[^"\'>\s]*archive\.org[^"\'>\s]+\.mp3',
-    re.IGNORECASE
-)
-
-HREF_RE = re.compile(
-    r'href=["\']([^"\']+)["\']',
-    re.IGNORECASE
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("music-ext303")
 
 
 def get_api_key() -> str:
-    api_key = os.environ.get("YEMOT_API_KEY", "")
-    api_key = api_key.strip().strip("'\"׳״` ")
-
-    if not api_key:
-        raise RuntimeError("לא נמצא YEMOT_API_KEY במשתני הסביבה")
-
-    try:
-        api_key.encode("latin-1")
-    except UnicodeEncodeError:
-        raise RuntimeError(f"YEMOT_API_KEY מכיל תווים לא תקינים: {repr(api_key)}")
-
-    return api_key
+    key = os.environ.get("YEMOT_API_KEY", "").strip().strip("'\"׳״` ")
+    if not key:
+        raise RuntimeError("לא נמצא YEMOT_API_KEY")
+    key.encode("latin-1")
+    return key
 
 
-def ensure_dir(path: str):
+def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def load_state(path: str) -> dict:
+def load_state() -> dict:
+    path = CONFIG["state_file"]
     if not os.path.exists(path):
-        return {
-            "uploaded_audio_urls": [],
-            "seen_post_ids": [],
-            "initialized": False,
-        }
-
+        return {"last_id": 0, "initialized": False}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            return json.load(f)
     except Exception:
-        data = {}
-
-    data.setdefault("uploaded_audio_urls", [])
-    data.setdefault("seen_post_ids", [])
-    data.setdefault("initialized", False)
-    return data
+        return {"last_id": 0, "initialized": False}
 
 
-def save_state(path: str, state: dict):
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
+def save_state(state: dict):
+    path = CONFIG["state_file"]
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
+    os.replace(tmp, path)
 
 
-def get_yemot_base() -> str:
-    if CONFIG["yemot_private"]:
-        return "https://private.call2all.co.il/ym/api/"
-    return "https://www.call2all.co.il/ym/api/"
-
-
-def fetch_text(url: str) -> str:
-    response = requests.get(
-        url,
-        headers={"User-Agent": CONFIG["user_agent"]},
-        timeout=CONFIG["timeout"],
-        allow_redirects=True,
+def fetch_posts() -> list:
+    params = {
+        "per_page": 10,
+        "categories": CONFIG["category_id"],
+        "orderby": "date",
+        "order": "desc",
+        "_fields": "id,date,title,video_to_post",
+    }
+    headers = {
+        "accept": "application/json",
+        "referer": "https://hamenagen.net/",
+    }
+    r = cffi_requests.get(
+        CONFIG["api_url"], params=params, headers=headers,
+        impersonate="chrome110", timeout=CONFIG["timeout"]
     )
-    response.raise_for_status()
-    return response.text
-
-
-def fetch_json(url: str):
-    response = requests.get(
-        url,
-        headers={"User-Agent": CONFIG["user_agent"]},
-        timeout=CONFIG["timeout"],
-        allow_redirects=True,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def parse_iso_datetime(value: str):
-    if not value:
-        return None
-    try:
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def extract_entries_from_feed(feed_json):
-    out = []
-    feed = feed_json.get("feed", {})
-    entries = feed.get("entry", [])
-
-    for entry in entries:
-        post_id = None
-        title = ""
-        published = None
-        post_url = None
-
-        if "id" in entry and "$t" in entry["id"]:
-            post_id = entry["id"]["$t"]
-
-        if "title" in entry and "$t" in entry["title"]:
-            title = entry["title"]["$t"].strip()
-
-        if "published" in entry and "$t" in entry["published"]:
-            published = parse_iso_datetime(entry["published"]["$t"])
-
-        for link in entry.get("link", []):
-            if link.get("rel") == "alternate" and link.get("type") == "text/html":
-                post_url = link.get("href")
-                break
-
-        if post_id and post_url:
-            out.append({
-                "post_id": post_id,
-                "title": title or "unknown-title",
-                "published": published,
-                "post_url": post_url,
-            })
-
-    return out
-
-
-def extract_archive_audio_url(post_html: str):
-    m = ARCHIVE_MP3_RE.search(post_html)
-    if m:
-        return m.group(0)
-
-    hrefs = HREF_RE.findall(post_html)
-    for href in hrefs:
-        href_lower = href.lower()
-        if "archive.org" in href_lower and href_lower.endswith(".mp3"):
-            return href
-
-    return None
-
-
-def remote_exists(url: str) -> bool:
-    try:
-        r = requests.head(url, timeout=CONFIG["timeout"], allow_redirects=True)
-        if r.status_code == 200:
-            return True
-
-        r = requests.get(
-            url,
-            headers={"Range": "bytes=0-0"},
-            timeout=CONFIG["timeout"],
-            allow_redirects=True,
-            stream=True
-        )
-        return r.status_code in (200, 206)
-    except requests.RequestException:
-        return False
-
-
-def sanitize_filename(name: str) -> str:
-    safe = re.sub(r'[\\/:*?"<>|]+', "_", name).strip()
-    safe = re.sub(r"\s+", " ", safe)
-    if not safe:
-        safe = f"audio_{int(time.time())}"
-    return safe
-
-
-def normalize_filename_from_url(url: str) -> str:
-    raw_name = os.path.basename(url.split("?", 1)[0])
-    raw_name = unquote(raw_name)
-    safe = sanitize_filename(raw_name)
-    if not safe.lower().endswith(".mp3"):
-        safe += ".mp3"
-    return safe
-
-
-def get_file_size_mb(path: str) -> float:
-    return os.path.getsize(path) / (1024 * 1024)
-
-
-def download_file(url: str, download_dir: str) -> str:
-    ensure_dir(download_dir)
-    filename = normalize_filename_from_url(url)
-    local_path = os.path.join(download_dir, filename)
-
-    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-        logger.info(f"הקובץ כבר קיים מקומית: {local_path}")
-        return local_path
-
-    with requests.get(url, timeout=CONFIG["timeout"], stream=True) as r:
-        r.raise_for_status()
-        with open(local_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    f.write(chunk)
-
-    logger.info(f"הורד: {local_path}")
-    return local_path
+    r.raise_for_status()
+    return r.json()
 
 
 def israel_time() -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%H:%M")
+
 
 def build_tts_text(title: str) -> str:
     title = re.sub(r"\s+", " ", title).strip()
     t = time_to_hebrew(israel_time())
     if " - " in title:
         parts = title.split(" - ", 1)
-        artist = parts[0].strip()
-        song = parts[1].strip()
+        # בהמנגן הפורמט הוא: "שם השיר - שם האמן"
+        song = parts[0].strip()
+        artist = parts[1].strip()
         return f"{t} במוקד המוזיקה הזמר {artist} בשיר {song}"
-    else:
-        return f"{t} במוקד המוזיקה {title}"
+    return f"{t} במוקד המוזיקה {title}"
 
 
-async def _tts_async(text: str, output_path: str):
-    last_error = None
-    for attempt in range(5):
+async def _tts_async(text: str, path: str):
+    last_err = None
+    for _ in range(5):
         try:
-            communicate = edge_tts.Communicate(text, CONFIG["tts_voice"])
-            await communicate.save(output_path)
+            await edge_tts.Communicate(text, CONFIG["tts_voice"]).save(path)
             return
         except Exception as e:
-            last_error = e
+            last_err = e
             await asyncio.sleep(3)
-    raise last_error
+    raise last_err
 
 
-def create_tts_file(title: str, tts_dir: str) -> str:
-    ensure_dir(tts_dir)
-
-    tts_text = build_tts_text(title)
-    base_name = sanitize_filename(f"tts_{title}")
-    output_path = os.path.join(tts_dir, f"{base_name}.mp3")
-
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-        logger.info(f"קובץ הקריינות כבר קיים: {output_path}")
-        return output_path
-
-    logger.info(f"יוצר קריינות: {tts_text}")
-    asyncio.run(_tts_async(tts_text, output_path))
-
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        raise RuntimeError("יצירת הקריינות נכשלה: לא נוצר קובץ תקין")
-
-    logger.info(f"נוצר קובץ קריינות: {output_path}")
-    return output_path
+def create_tts_file(post_id: int, text: str) -> str:
+    ensure_dir(CONFIG["tts_dir"])
+    path = os.path.join(CONFIG["tts_dir"], f"tts_{post_id}.mp3")
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    logger.info(f"יוצר TTS: {text[:70]}")
+    asyncio.run(_tts_async(text, path))
+    return path
 
 
-def compress_audio_if_needed(input_path: str) -> str:
-    max_size_mb = CONFIG["max_upload_size_mb"]
-    current_size_mb = get_file_size_mb(input_path)
+def download_youtube_audio(youtube_url: str, post_id: int) -> str:
+    ensure_dir(CONFIG["download_dir"])
+    out_path = os.path.join(CONFIG["download_dir"], f"song_{post_id}.mp3")
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
 
-    if current_size_mb <= max_size_mb:
-        logger.info(f"הקובץ קטן מספיק להעלאה: {current_size_mb:.2f}MB")
-        return input_path
-
-    ensure_dir(CONFIG["compressed_dir"])
-
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = os.path.join(CONFIG["compressed_dir"], f"{sanitize_filename(base_name)}_compressed.mp3")
-
-    logger.info(f"הקובץ גדול מדי ({current_size_mb:.2f}MB), מבצע דחיסה...")
-
+    logger.info(f"מוריד מ-YouTube: {youtube_url}")
     cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-ac", CONFIG["ffmpeg_channels"],
-        "-ar", CONFIG["ffmpeg_sample_rate"],
-        "-b:a", CONFIG["ffmpeg_bitrate"],
-        output_path
+        "yt-dlp",
+        "--extract-audio",
+        "--audio-format", "mp3",
+        "--audio-quality", "128K",
+        "--no-playlist",
+        "--output", out_path,
+        "--no-progress",
+        youtube_url,
     ]
-
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        raise RuntimeError("ffmpeg לא מותקן או לא זמין ב-PATH")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"שגיאה בדחיסת אודיו: {e}")
-
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        raise RuntimeError("נכשלה יצירת גרסה דחוסה")
-
-    logger.info(f"נוצר קובץ דחוס: {output_path} ({get_file_size_mb(output_path):.2f}MB)")
-    return output_path
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError(f"yt-dlp לא יצר קובץ: {out_path}")
+    return out_path
 
 
-def guess_mime_type(file_path: str) -> str:
-    mime, _ = mimetypes.guess_type(file_path)
-    return mime or "application/octet-stream"
+def compress_if_needed(path: str) -> str:
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    if size_mb <= CONFIG["max_upload_size_mb"]:
+        return path
+    ensure_dir(CONFIG["download_dir"])
+    out = path.replace(".mp3", "_comp.mp3")
+    logger.info(f"דוחס קובץ {size_mb:.1f}MB")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", path,
+        "-ac", "1", "-ar", CONFIG["ffmpeg_sample_rate"],
+        "-b:a", CONFIG["ffmpeg_bitrate"], out
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out
 
 
-def upload_file_to_yemot(local_path: str):
+def upload_to_yemot(local_path: str):
     api_key = get_api_key()
-    upload_url = get_yemot_base() + "UploadFile"
-    path_value = f"ivr2:{CONFIG['target_extension'].strip('/')}"
-
-    data = {
-        "path": path_value,
-        "autoNumbering": "1",
-        "convertAudio": "1" if CONFIG["convert_audio"] else "0",
-    }
-
-    mime_type = guess_mime_type(local_path)
-    logger.info(f"מעלה ליעד: {path_value} | קובץ: {os.path.basename(local_path)}")
-
+    mime, _ = mimetypes.guess_type(local_path)
     with open(local_path, "rb") as f:
-        response = requests.post(
-            upload_url,
-            data=data,
-            files={"file": (os.path.basename(local_path), f, mime_type)},
+        r = requests.post(
+            "https://www.call2all.co.il/ym/api/UploadFile",
+            data={"path": f"ivr2:{CONFIG['target_extension']}", "autoNumbering": "1", "convertAudio": "1"},
+            files={"file": (os.path.basename(local_path), f, mime or "audio/mpeg")},
             headers={"authorization": api_key},
-            timeout=CONFIG["timeout"] * 2
+            timeout=CONFIG["timeout"] * 8,
         )
-
-    if response.status_code != 200:
-        raise RuntimeError(f"שגיאת HTTP בהעלאה: {response.status_code} | {response.text}")
-
-    try:
-        result = response.json()
-    except Exception:
-        result = {"raw": response.text}
-
+    r.raise_for_status()
+    result = r.json()
     if isinstance(result, dict) and result.get("responseStatus") == "EXCEPTION":
-        raise RuntimeError(f"שגיאת API בהעלאה: {result}")
-
+        raise RuntimeError(f"שגיאת API: {result}")
     return result
 
 
+def process_post(post: dict, state: dict):
+    post_id = post["id"]
+    title = post.get("title", {}).get("rendered", "")
+    title = re.sub(r"<[^>]+>", "", title).strip()
+    youtube_url = post.get("video_to_post", "").strip()
+
+    if not youtube_url:
+        logger.info(f"#{post_id} {title}: אין קישור YouTube — מדלג")
+        state["last_id"] = post_id
+        save_state(state)
+        return
+
+    tts_text = build_tts_text(title)
+    song_path = None
+    tts_path = None
+    comp_path = None
+
+    try:
+        song_path = download_youtube_audio(youtube_url, post_id)
+        comp_path = compress_if_needed(song_path)
+        tts_path = create_tts_file(post_id, tts_text)
+
+        # שיר קודם → TTS אחרון (ימות משמיע TTS ראשון)
+        upload_to_yemot(comp_path)
+        logger.info(f"#{post_id}: שיר הועלה")
+
+        upload_to_yemot(tts_path)
+        logger.info(f"#{post_id}: הכרזה הועלתה | {tts_text[:60]}")
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"#{post_id}: yt-dlp נכשל: {e.stderr.decode() if e.stderr else e}")
+        return
+    except Exception as e:
+        logger.exception(f"#{post_id}: שגיאה: {e}")
+        return
+    finally:
+        for p in {song_path, comp_path, tts_path}:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+    state["last_id"] = post_id
+    save_state(state)
+    time.sleep(2)
+
+
 def process_once():
-    state = load_state(CONFIG["state_file"])
-    uploaded_audio_urls = set(state.get("uploaded_audio_urls", []))
-    seen_post_ids = set(state.get("seen_post_ids", []))
-    initialized = bool(state.get("initialized", False))
+    state = load_state()
+    last_id = state.get("last_id", 0)
+    initialized = state.get("initialized", False)
 
-    logger.info(f"סורק את הפיד: {CONFIG['feed_url']}")
-    feed_json = fetch_json(CONFIG["feed_url"])
-    entries = extract_entries_from_feed(feed_json)
-    logger.info(f"נמצאו {len(entries)} פוסטים בפיד")
+    logger.info("סורק hamenagen.net")
+    try:
+        posts = fetch_posts()
+    except Exception as e:
+        logger.exception(f"שגיאה בקריאת API: {e}")
+        return
 
-    entries = sorted(
-        entries,
-        key=lambda x: x.get("published") or datetime.min.replace(tzinfo=timezone.utc)
-    )
+    if not posts:
+        return
 
     if not initialized:
-        logger.info("ריצה ראשונה: מסמן את הפוסטים הקיימים ככבר נראו, מלבד האחרון")
-
-        for entry in entries[:-10]:
-            seen_post_ids.add(entry["post_id"])
-
-        state["seen_post_ids"] = sorted(seen_post_ids)
+        sorted_posts = sorted(posts, key=lambda p: p["id"])
+        backfill = sorted_posts[-3:]
+        last_id = backfill[0]["id"] - 1
+        state["last_id"] = last_id
         state["initialized"] = True
-        save_state(CONFIG["state_file"], state)
+        save_state(state)
+        logger.info(f"אותחל. מעבד {len(backfill)} שירים אחרונים")
 
-        logger.info("הסקריפט אותחל. מעלה את 10 הפוסטים האחרונים...")
+    new_posts = sorted(
+        [p for p in posts if p["id"] > last_id],
+        key=lambda p: p["id"]
+    )
 
-    found_any_new = False
+    if not new_posts:
+        logger.info("אין שירים חדשים")
+        return
 
-    for entry in entries:
-        post_id = entry["post_id"]
-        post_url = entry["post_url"]
-        title = entry["title"]
-
-        if post_id in seen_post_ids:
-            continue
-
-        logger.info(f"בודק פוסט חדש: {title}")
-
-        try:
-            post_html = fetch_text(post_url)
-        except Exception as e:
-            logger.exception(f"שגיאה בקריאת פוסט {post_url}: {e}")
-            continue
-
-        audio_url = extract_archive_audio_url(post_html)
-
-        if not audio_url:
-            logger.info("לא נמצא קישור archive.org mp3 בפוסט")
-            seen_post_ids.add(post_id)
-            state["seen_post_ids"] = sorted(seen_post_ids)
-            save_state(CONFIG["state_file"], state)
-            continue
-
-        logger.info(f"נמצא אודיו: {audio_url}")
-
-        if audio_url in uploaded_audio_urls:
-            logger.info("האודיו כבר הועלה בעבר")
-            seen_post_ids.add(post_id)
-            state["seen_post_ids"] = sorted(seen_post_ids)
-            save_state(CONFIG["state_file"], state)
-            continue
-
-        if not remote_exists(audio_url):
-            logger.info("קישור האודיו לא זמין כרגע")
-            continue
-
-        song_path = download_file(audio_url, CONFIG["download_dir"])
-        song_path_for_upload = compress_audio_if_needed(song_path)
-        tts_path = create_tts_file(title, CONFIG["tts_dir"])
-
-        song_result = upload_file_to_yemot(song_path_for_upload)
-        logger.info(f"השיר הועלה: {song_result}")
-
-        tts_result = upload_file_to_yemot(tts_path)
-        logger.info(f"הקריינות הועלתה: {tts_result}")
-
-        # מחיקת קבצים מקומיים לחיסכון במקום
-        for path in set([song_path, song_path_for_upload, tts_path]):
-            try:
-                os.remove(path)
-                logger.info(f"נמחק: {path}")
-            except Exception:
-                pass
-
-        found_any_new = True
-
-        uploaded_audio_urls.add(audio_url)
-        seen_post_ids.add(post_id)
-        state["uploaded_audio_urls"] = sorted(uploaded_audio_urls)
-        state["seen_post_ids"] = sorted(seen_post_ids)
-        save_state(CONFIG["state_file"], state)
-
-    if not found_any_new:
-        logger.info("לא נמצא שיר חדש להעלאה בסבב הזה")
+    logger.info(f"נמצאו {len(new_posts)} שירים חדשים")
+    for post in new_posts:
+        process_post(post, state)
+        state = load_state()
 
 
 def main():
-    ensure_dir(CONFIG["download_dir"])
     ensure_dir(CONFIG["tts_dir"])
-    ensure_dir(CONFIG["compressed_dir"])
+    ensure_dir(CONFIG["download_dir"])
     get_api_key()
-
-    logger.info("הסקריפט התחיל — שירים חדשים שלוחה 303")
+    logger.info("התחיל — שירים חדשים שלוחה 303")
     logger.info(f"בדיקה כל {CONFIG['check_interval_seconds']} שניות")
-
     while True:
         try:
             process_once()
         except Exception as e:
             logger.exception(f"שגיאה: {e}")
-
         time.sleep(CONFIG["check_interval_seconds"])
 
 
