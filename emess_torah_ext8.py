@@ -8,6 +8,7 @@ import json
 import time
 import logging
 import mimetypes
+import subprocess
 from datetime import datetime
 
 import requests
@@ -106,6 +107,9 @@ CONFIG = {
     "downloads_dir": os.path.join(DATA_DIR, "torah_downloads"),
     "tts_voice": "he-IL-AvriNeural",
     "timeout": 60,
+    "max_upload_mb": 45,
+    "ffmpeg_bitrate": "48k",
+    "ffmpeg_sample_rate": "22050",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -233,6 +237,20 @@ def upload_to_yemot(local_path: str):
     return result
 
 
+def compress_if_needed(path: str) -> str:
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    if size_mb <= CONFIG["max_upload_mb"]:
+        return path
+    out = path.replace(".mp3", "_comp.mp3")
+    logger.info(f"דוחס {size_mb:.1f}MB → {out}")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", path,
+        "-ac", "1", "-ar", CONFIG["ffmpeg_sample_rate"],
+        "-b:a", CONFIG["ffmpeg_bitrate"], out
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out
+
+
 def cleanup(*paths):
     for p in paths:
         if p and os.path.exists(p):
@@ -261,10 +279,13 @@ def upload_episode(ep: dict, show_name: str) -> bool:
         logger.info(f"{show_name} #{ep_id}: מוריד {audio_url}")
         download_mp3(audio_url, episode_path)
 
+        # דחוס אם גדול מ-45MB
+        upload_path = compress_if_needed(episode_path)
+
         # 2. העלה שידור קודם (ימות משמיע שני)
-        upload_to_yemot(episode_path)
+        upload_to_yemot(upload_path)
         logger.info(f"{show_name} #{ep_id}: שידור הועלה | {title}")
-        cleanup(episode_path)
+        cleanup(episode_path, upload_path)
 
         # 3. צור והעלה הכרזה (ימות משמיע ראשון)
         announce_path = create_tts_announcement(ep_id, show_name, day_he)
