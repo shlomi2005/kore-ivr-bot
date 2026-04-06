@@ -134,6 +134,18 @@ def download_youtube_audio(youtube_url: str, post_id: int) -> str:
         return out_path
 
     logger.info(f"מוריד מ-YouTube: {youtube_url}")
+
+    cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE", "")
+    cookies_env = os.environ.get("YOUTUBE_COOKIES", "")
+
+    # כתיבת קובץ עוגיות אם הועבר כ-env var
+    tmp_cookies = None
+    if cookies_env and not cookies_file:
+        tmp_cookies = os.path.join(DATA_DIR, "yt_cookies.txt")
+        with open(tmp_cookies, "w") as f:
+            f.write(cookies_env)
+        cookies_file = tmp_cookies
+
     cmd = [
         "yt-dlp",
         "--extract-audio",
@@ -142,8 +154,14 @@ def download_youtube_audio(youtube_url: str, post_id: int) -> str:
         "--no-playlist",
         "--output", out_path,
         "--no-progress",
-        youtube_url,
+        "--extractor-args", "youtube:player_client=android,web",
+        "--sleep-interval", "2",
+        "--max-sleep-interval", "5",
     ]
+    if cookies_file and os.path.exists(cookies_file):
+        cmd += ["--cookies", cookies_file]
+
+    cmd.append(youtube_url)
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
         raise RuntimeError(f"yt-dlp לא יצר קובץ: {out_path}")
