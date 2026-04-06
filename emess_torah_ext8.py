@@ -163,8 +163,13 @@ def fetch_episodes(tax_id: int) -> list:
 
 def get_audio_url(episode: dict) -> str:
     audios = episode.get("audio_in_content", [])
-    if audios and audios[0].get("audio_file"):
-        return audios[0]["audio_file"]
+    if not audios:
+        return ""
+    first = audios[0]
+    if isinstance(first, dict):
+        return first.get("audio_file", "")
+    if isinstance(first, str) and first.startswith("http"):
+        return first
     return ""
 
 
