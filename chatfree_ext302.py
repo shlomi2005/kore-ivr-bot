@@ -119,11 +119,16 @@ def clean_text(text: str) -> str:
     return text[:500]
 
 
+BASE_URL = "https://yeshiva-zucher.chatfree.app"
+
 def extract_video_url(text: str) -> str:
     """מחלץ URL של וידאו מתוך הודעה"""
     m = re.search(r'\[video-embedded#\]\(([^)]+)\)', text)
     if m:
-        return m.group(1).strip()
+        url = m.group(1).strip()
+        if url.startswith('/'):
+            url = BASE_URL + url
+        return url
     m = re.search(r'(https?://\S+\.(?:mp4|mov|avi|webm|mkv))', text, re.IGNORECASE)
     if m:
         return m.group(1).strip()
