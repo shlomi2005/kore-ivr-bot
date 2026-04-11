@@ -11,6 +11,8 @@ import logging
 import mimetypes
 from datetime import datetime, timezone, timedelta
 
+import subprocess
+
 import requests
 import edge_tts
 from curl_cffi import requests as cffi_requests
@@ -25,9 +27,13 @@ CONFIG = {
     "api_url": "https://yeshiva-zucher.chatfree.app/api/messages",
     "check_interval_seconds": 120,
     "tts_dir": os.path.join(DATA_DIR, "tts_yeshiva"),
+    "video_dir": os.path.join(DATA_DIR, "vid_yeshiva"),
     "state_file": os.path.join(DATA_DIR, "state_yeshiva.json"),
     "timeout": 30,
     "tts_voice": "he-IL-AvriNeural",
+    "max_upload_size_mb": 45,
+    "ffmpeg_bitrate": "48k",
+    "ffmpeg_sample_rate": "22050",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -111,6 +117,75 @@ def clean_text(text: str) -> str:
     text = re.sub(r'wa\.me/\S+', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text[:500]
+
+
+def extract_video_url(text: str) -> str:
+    """מחלץ URL של וידאו מתוך הודעה"""
+    m = re.search(r'\[video-embedded#\]\(([^)]+)\)', text)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'(https?://\S+\.(?:mp4|mov|avi|webm|mkv))', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def compress_if_needed(path: str) -> str:
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    if size_mb <= CONFIG["max_upload_size_mb"]:
+        return path
+    out = path.replace(".mp3", "_comp.mp3")
+    logger.info(f"דוחס {size_mb:.1f}MB")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", path,
+        "-ac", "1", "-ar", CONFIG["ffmpeg_sample_rate"],
+        "-b:a", CONFIG["ffmpeg_bitrate"], out
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out
+
+
+def download_video_audio(url: str, msg_id: int) -> str:
+    """מוריד וידאו ומחלץ ממנו אודיו"""
+    ensure_dir(CONFIG["video_dir"])
+    out_path = os.path.join(CONFIG["video_dir"], f"vid_{msg_id}.mp3")
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
+
+    logger.info(f"מוריד וידאו: {url[:70]}")
+
+    # נסיון עם yt-dlp (מתאים ל-YouTube + קישורים ישירים רבים)
+    try:
+        cmd = [
+            "yt-dlp", "--extract-audio", "--audio-format", "mp3",
+            "--audio-quality", "128K", "--no-playlist",
+            "--output", out_path, "--no-progress",
+            "--extractor-args", "youtube:player_client=android,web",
+        ]
+        cmd.append(url)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, timeout=180)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        logger.warning(f"yt-dlp נכשל, מנסה הורדה ישירה: {e}")
+
+    # fallback: הורדה ישירה + ffmpeg
+    tmp = os.path.join(CONFIG["video_dir"], f"vid_{msg_id}.tmp")
+    r = requests.get(url, timeout=120, stream=True)
+    r.raise_for_status()
+    with open(tmp, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            f.write(chunk)
+    subprocess.run([
+        "ffmpeg", "-y", "-i", tmp,
+        "-vn", "-ac", "1", "-ar", CONFIG["ffmpeg_sample_rate"],
+        "-b:a", CONFIG["ffmpeg_bitrate"], out_path
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.remove(tmp)
+    except Exception:
+        pass
+    return out_path
 
 
 def build_tts_text(msg: dict) -> str:
@@ -198,24 +273,46 @@ def process_once():
     for msg in new_messages:
         if msg.get("deleted"):
             continue
-        text = clean_text(msg.get("text", ""))
-        if not text:
-            continue
 
         msg_id = msg["id"]
-        tts_text = build_tts_text(msg)
+        raw_text = msg.get("text", "")
+        video_url = extract_video_url(raw_text)
+        text = clean_text(raw_text)
+
+        if not text and not video_url:
+            continue
+
+        tts_text = build_tts_text(msg) if text else None
+        vid_path = None
+        tts_path = None
 
         try:
-            tts_path = create_tts_file(msg_id, tts_text)
-            result = upload_to_yemot(tts_path)
-            logger.info(f"הועלה #{msg_id}: {tts_text[:60]} | {result}")
-            try:
-                os.remove(tts_path)
-            except Exception:
-                pass
+            # וידאו קודם — בימות הראשון שמור ראשון
+            if video_url:
+                try:
+                    vid_path = download_video_audio(video_url, msg_id)
+                    vid_path = compress_if_needed(vid_path)
+                    upload_to_yemot(vid_path)
+                    logger.info(f"#{msg_id}: וידאו הועלה")
+                except Exception as e:
+                    logger.warning(f"#{msg_id}: וידאו נכשל (ממשיך ל-TTS): {e}")
+
+            # אחר כך TTS
+            if tts_text:
+                tts_path = create_tts_file(msg_id, tts_text)
+                upload_to_yemot(tts_path)
+                logger.info(f"#{msg_id}: TTS הועלה | {tts_text[:60]}")
+
         except Exception as e:
             logger.exception(f"שגיאה #{msg_id}: {e}")
             continue
+        finally:
+            for p in [vid_path, tts_path]:
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
         state["last_id"] = msg_id
         save_state(state)
@@ -224,6 +321,7 @@ def process_once():
 
 def main():
     ensure_dir(CONFIG["tts_dir"])
+    ensure_dir(CONFIG["video_dir"])
     get_api_key()
     logger.info("התחיל — בחורי ישיבות שלוחה 302")
     logger.info(f"בדיקה כל {CONFIG['check_interval_seconds']} שניות")
