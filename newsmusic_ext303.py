@@ -15,7 +15,6 @@ from datetime import datetime, timezone, timedelta
 import requests
 import edge_tts
 from curl_cffi import requests as cffi_requests
-from hebrew_time import time_to_hebrew
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
@@ -89,8 +88,10 @@ def fetch_posts() -> list:
     return r.json()
 
 
-def israel_time() -> str:
-    return (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%H:%M")
+def israel_day() -> str:
+    days = ["יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "שבת קודש", "יום ראשון"]
+    now = datetime.now(timezone.utc) + timedelta(hours=3)
+    return days[now.weekday()]
 
 
 def clean_title(title: str) -> str:
@@ -105,7 +106,7 @@ def clean_title(title: str) -> str:
 
 def build_tts_text(title: str) -> str:
     title = clean_title(title)
-    t = time_to_hebrew(israel_time())
+    t = israel_day()
     if " - " in title:
         parts = title.split(" - ", 1)
         song = parts[0].strip()
