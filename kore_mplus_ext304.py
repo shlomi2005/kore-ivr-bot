@@ -153,10 +153,11 @@ def process_once():
         logger.info(f"אותחל. {len(seen_ids)} פריטים סומנו")
         return
 
-    # חדשים בלבד, מהישן לחדש
+    # חדשים בלבד — מהחדש לישן כדי שהישן יעלה אחרון ויישמע ראשון בימות
     new_items = sorted(
         [i for i in items if i["id"] not in seen_ids],
-        key=lambda x: x["id"]
+        key=lambda x: x["id"],
+        reverse=True
     )
 
     if not new_items:
