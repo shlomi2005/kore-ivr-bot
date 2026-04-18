@@ -145,21 +145,19 @@ def download_youtube_audio(youtube_url: str, post_id: int) -> str:
 
     logger.info(f"מוריד מ-YouTube: {youtube_url}")
 
-    cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE", "")
-    cookies_env = os.environ.get("YOUTUBE_COOKIES", "")
-    logger.info(f"YOUTUBE_COOKIES env len={len(cookies_env)}, YOUTUBE_COOKIES_FILE='{cookies_file}'")
-
-    # כתיבת קובץ עוגיות אם הועבר כ-env var
-    tmp_cookies = None
-    if cookies_env and not cookies_file:
+    # חיפוש קובץ cookies: קובץ מובנה בריפו, env var עם נתיב, או env var עם תוכן
+    bundled = os.path.join(os.path.dirname(__file__), "yt_cookies.txt")
+    cookies_file = ""
+    if os.path.exists(bundled):
+        cookies_file = bundled
+    elif os.environ.get("YOUTUBE_COOKIES_FILE", ""):
+        cookies_file = os.environ["YOUTUBE_COOKIES_FILE"]
+    elif os.environ.get("YOUTUBE_COOKIES", ""):
         ensure_dir(DATA_DIR)
-        tmp_cookies = os.path.join(DATA_DIR, "yt_cookies.txt")
-        # Railway עלול להחליף שורות חדשות ב-\n כטקסט
-        content = cookies_env.replace("\\n", "\n")
-        with open(tmp_cookies, "w") as f:
-            f.write(content)
-        cookies_file = tmp_cookies
-        logger.info(f"cookies נכתבו: {os.path.getsize(tmp_cookies)} bytes")
+        tmp = os.path.join(DATA_DIR, "yt_cookies.txt")
+        with open(tmp, "w") as f:
+            f.write(os.environ["YOUTUBE_COOKIES"].replace("\\n", "\n"))
+        cookies_file = tmp
 
     cmd = [
         "yt-dlp",
