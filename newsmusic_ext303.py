@@ -151,10 +151,14 @@ def download_youtube_audio(youtube_url: str, post_id: int) -> str:
     # כתיבת קובץ עוגיות אם הועבר כ-env var
     tmp_cookies = None
     if cookies_env and not cookies_file:
+        ensure_dir(DATA_DIR)
         tmp_cookies = os.path.join(DATA_DIR, "yt_cookies.txt")
+        # Railway עלול להחליף שורות חדשות ב-\n כטקסט
+        content = cookies_env.replace("\\n", "\n")
         with open(tmp_cookies, "w") as f:
-            f.write(cookies_env)
+            f.write(content)
         cookies_file = tmp_cookies
+        logger.info(f"cookies נכתבו: {os.path.getsize(tmp_cookies)} bytes")
 
     cmd = [
         "yt-dlp",
@@ -170,6 +174,9 @@ def download_youtube_audio(youtube_url: str, post_id: int) -> str:
     ]
     if cookies_file and os.path.exists(cookies_file):
         cmd += ["--cookies", cookies_file]
+        logger.info(f"משתמש ב-cookies: {cookies_file}")
+    else:
+        logger.warning("אין קובץ cookies — YouTube עלול לחסום")
 
     cmd.append(youtube_url)
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
