@@ -22,7 +22,7 @@ CONFIG = {
     "target_extension": "303",
     "api_url": "https://hamenagen.net/wp-json/wp/v2/posts",
     "category_id": 4,
-    "check_interval_seconds": 300,
+    "check_interval_seconds": 120,
     "tts_dir": os.path.join(DATA_DIR, "tts_music"),
     "download_dir": os.path.join(DATA_DIR, "dl_music"),
     "state_file": os.path.join(DATA_DIR, "state_music.json"),
