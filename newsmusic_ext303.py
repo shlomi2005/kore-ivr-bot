@@ -147,6 +147,7 @@ def download_youtube_audio(youtube_url: str, post_id: int) -> str:
 
     cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE", "")
     cookies_env = os.environ.get("YOUTUBE_COOKIES", "")
+    logger.info(f"YOUTUBE_COOKIES env len={len(cookies_env)}, YOUTUBE_COOKIES_FILE='{cookies_file}'")
 
     # כתיבת קובץ עוגיות אם הועבר כ-env var
     tmp_cookies = None
